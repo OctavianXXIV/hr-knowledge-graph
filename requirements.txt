@@ -1,0 +1,10 @@
+pandas
+numpy
+neo4j
+python-dotenv
+jupyter
+ipykernel
+rdflib
+pyshacl
+ruff
+python-dotenv

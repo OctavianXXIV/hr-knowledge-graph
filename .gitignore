@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# project
+cred.env
+.venv/
+data/raw/*
+!data/raw/.gitkeep
+chroma/
+logs/*
+!logs/.gitkeep
+.ipynb_checkpoints/
