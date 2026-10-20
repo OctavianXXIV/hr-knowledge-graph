@@ -227,3 +227,4 @@ chroma/
 logs/*
 !logs/.gitkeep
 .ipynb_checkpoints/.DS_Store
+.DS_Store
