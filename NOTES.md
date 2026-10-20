@@ -3,7 +3,7 @@
 Log of decisions that shape the graph. Each entry: decision, reason, alternative rejected.
 Source: D1 exploratory analysis ([notebooks/01_eda.ipynb](notebooks/01_eda.ipynb)). All entries logged 2026-10-20 at the close of D1.
 
-Ground truth for D5 (Cypher must reproduce these): 1470 employees, 237 leavers, 16.1% attrition.
+Ground truth (Cypher must reproduce these): 1470 employees, 237 leavers, 16.1% attrition; 175 promotion-eligible employees under #13 (HR 6, R&D 115, Sales 54).
 
 ## Identity and loading
 
@@ -26,13 +26,15 @@ Ground truth for D5 (Cypher must reproduce these): 1470 employees, 237 leavers, 
 
 ### 4. Drop `MonthlyRate`, `DailyRate`, `HourlyRate`
 - **Decision:** drop them.
-- **Reason:** `DailyRate` and `HourlyRate` should be near-proportional if they describe pay, but correlations among all four pay columns are 0.03 or less in absolute value. They stay flat across `JobLevel` while `MonthlyIncome` rises from 2787 to 19192.
+- **Reason:** -their meaning is undocumented and they contradict `MonthlyIncome`, so keeping them risks the LLM quoting `DailyRate` as someone's pay. Evidence: `DailyRate` and `HourlyRate` should be near-proportional if they describe pay, but correlations among all four pay columns are 0.03 or less in absolute value, and they stay flat across `JobLevel` while `MonthlyIncome` rises from 2787 to 19192.
 - **Rejected:** keeping them as properties.
 
 ## Nodes versus properties
 
 ### 5. Nodes: `Employee`, `Department`, `JobRole`
-- **Decision:** only these three are nodes. Test: a value is a node only if it has an identity and relationships beyond its label.
+- **Decision:** only these three are nodes taken from IBM columns. Test: a value is a node only if it has an identity and relationships beyond its label.
+- **Other nodes (not from IBM columns):** `Skill` (ESCO subset, D2/D3) and `Policy` (synthetic documents, D8).
+- **Consequence:** because thresholds (`JobLevel`, tenure, rating) are properties, policy eligibility is computed by Cypher templates, not by traversal. `Policy -[:APPLIES_TO]->` links only to `Department` or `JobRole`.
 - **Reason:** departments and roles have structure of their own (roles belong to departments, policies and managers attach to them).
 - **Rejected:** "would traverse through and see who shares", which cannot separate `Department` from `Gender`.
 
@@ -56,17 +58,19 @@ Ground truth for D5 (Cypher must reproduce these): 1470 employees, 237 leavers, 
 ### 9. Department-scoped `JobRole` nodes (option B)
 - **Decision:** one role node per department and title (for example Sales Manager, HR Manager, R&D Manager). Keep an explicit `Employee -> Department` edge, and require exactly one per employee (the department query must return all 1470).
 - **Reason:** `Manager` appears in 3 departments (11 HR, 54 R&D, 37 Sales); every other role is in exactly one. Scoping keeps `JobRole -> Department` many-to-one so a SHACL shape can enforce it.
-- **Cost:** `Manager` is no longer a unique name, so a composite or synthetic key is needed (such as `"Manager|Sales"`). Statistics split into small groups (HR Manager is 11 people).
+- **Key:** `role_id = "<Department>::<JobRole>"` (e.g. `"Sales::Manager"`) with a single-property uniqueness constraint; `name` and `department` stored as separate properties so "all Managers" stays a one-line query. Chosen over a composite key for portability (AuraDB Free).
+- **Cost:** Statistics split into small groups (HR Manager is 11 people).
 - **Rejected:** one shared `Manager` node linked to 3 departments, which makes `Employee -> JobRole -> Department` ambiguous and breaks a many-to-one shape.
+- **Check (D4):** the load fails if any employee's `Employee -> Department` disagrees with `Employee -> JobRole -> Department`.
 
 ### 10. `REPORTS_TO` generation rule (D3)
 - **Decision:** a manager must be in the same department, have `JobRole` in {Manager, Research Director}, have a strictly higher `JobLevel` (nearest level first), and have `YearsAtCompany` >= the employee's `YearsWithCurrManager`.
 - **Reason:** employees per manager come out at 4.7 (HR), 6.2 (R&D) and 11.1 (Sales), which is realistic. A strictly higher level cannot form cycles. The check found 0 employees with no candidate under the role-limited pool. Manufacturing Director is excluded: adding it drops R&D to 2.4 per manager, and 90 of its 145 people sit at level 2.
 - **Rejected:** "any higher level in the department can manage" (0.3-2.9 employees per manager, so nearly everyone is a manager); including Manufacturing Director.
-- **Open:** the tiebreak among equally near candidates (random, or weighted by span of control).
+- **Tiebreak (D3):** among equally near candidates, pick the one with the fewest reports so far; break remaining ties with the seeded RNG (seed 42). Averages hide skew, so D3 must also log max span, median span, and the number of managers with zero reports.
 
 ### 11. Level-5 employees are roots
-- **Decision:** the 69 level-5 employees (HR 7, R&D 49, Sales 13; 43 Manager and 26 Research Director) have no `REPORTS_TO` edge and no invented external node. The hierarchy is a forest of 69 trees, none crossing departments. Graph-grounded answers must say "no manager data in source" for them.
+- **Decision:** the 69 level-5 employees (HR 7, R&D 49, Sales 13; 43 Manager and 26 Research Director) have no `REPORTS_TO` edge and no invented external node. The hierarchy is a forest of 69 trees, none crossing departments. Graph-grounded answers describe them as "top of the generated hierarchy".
 - **Reason:** no real manager exists in the data; an invented node would corrupt counts like "how many managers do we have?".
 - **Consequences:** there is no single top or company-wide org chart; `REPORTS_TO*` ends at level 5, at most 4 hops; rules that escalate to a manager's manager need a fallback. The whole graph stays connected through Department and JobRole edges.
 - **Rejected:** a synthetic CEO or external-manager node.
@@ -89,7 +93,12 @@ Ground truth for D5 (Cypher must reproduce these): 1470 employees, 237 leavers, 
 - **Reason:** one source of truth. A derived `promotable` flag on 69 nodes duplicates the rule and can drift when it changes. Level 5 is the top of this CSV, not necessarily of the company.
 - **Rejected:** a `promotable` property on level-5 employees.
 
+### 15. Synthetic relationships are labelled at every layer
+- **Decision:** every generated edge (`REPORTS_TO`, `HAS_SKILL`) carries `source: "synthetic"`. Any answer that uses one must say the relationship is generated, not source data.
+- **Reason:** the IBM data has no manager or skill links. Without the label, the RAG system would state invented facts as truth — the failure this project exists to measure.
+- **Rejected:** labelling only in the README, which the LLM never sees.
+
 ## Open for D2-D4
-- Relationship type and property names (`WORKS_IN`, `REPORTS_TO`, `attrition` are placeholders).
-- Key format for department-scoped roles.
-- Tiebreak among equally near manager candidates.
+- Relationship type and property names (`WORKS_IN`, `HAS_ROLE`, `REPORTS_TO`, `attrition` are placeholders) — D2.
+- ESCO subset size and how skills attach to `JobRole` — D2.
+- Optional span-of-control cap if the D3 check shows outliers — D3.
